@@ -28,7 +28,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(RateLimitMiddleware::new(limiter.clone()))
             .route("/status", web::get().to(return_ok))
-            .route("/login", web::get().to(return_ok))
+            .route("/login", web::post().to(return_ok))
     })
     .bind(("127.0.0.1", 8080))?
     .run()
