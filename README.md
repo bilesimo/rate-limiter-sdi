@@ -5,7 +5,7 @@ A Rust rate limiter based on chapter 4 of *System Design Interview* by Alex Xu.
 This project implements a server-side API rate limiter with:
 
 - `actix-web` middleware
-- per-IP enforcement
+- per-IP enforcement based on the socket peer address
 - Redis-backed shared state
 - two algorithms: `fixed_window` and `token_bucket`
 - optional queueing for throttled requests
@@ -17,7 +17,7 @@ The implementation is designed to show the system design ideas clearly, not to b
 
 For each incoming HTTP request, the middleware:
 
-1. extracts the client IP address;
+1. extracts the client IP address from the socket peer address;
 2. matches the request against a configured rule;
 3. evaluates the selected rate-limiting algorithm in Redis;
 4. allows the request or returns `429 Too Many Requests`;

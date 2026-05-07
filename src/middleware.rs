@@ -9,7 +9,7 @@ use actix_web::{
 use serde::Serialize;
 use std::{
     future::{Future, Ready, ready},
-    net::{IpAddr, SocketAddr},
+    net::IpAddr,
     pin::Pin,
     rc::Rc,
     sync::Arc,
@@ -162,24 +162,7 @@ where
 }
 
 fn extract_client_ip(req: &ServiceRequest) -> Option<IpAddr> {
-    req.connection_info()
-        .realip_remote_addr()
-        .and_then(parse_ip)
-        .or_else(|| req.peer_addr().map(|addr| addr.ip()))
-}
-
-fn parse_ip(raw: &str) -> Option<IpAddr> {
-    let candidate = raw.split(',').next()?.trim();
-
-    if let Ok(ip) = candidate.parse::<IpAddr>() {
-        return Some(ip);
-    }
-
-    if let Ok(addr) = candidate.parse::<SocketAddr>() {
-        return Some(addr.ip());
-    }
-
-    None
+    req.peer_addr().map(|addr| addr.ip())
 }
 
 #[cfg(test)]
@@ -197,7 +180,7 @@ mod tests {
         test,
         web::{self, Data},
     };
-    use std::{sync::Arc, time::Duration};
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
 
     async fn ok_handler(_request: HttpRequest) -> HttpResponse {
         HttpResponse::Ok().finish()
@@ -240,14 +223,43 @@ mod tests {
 
         let request_one = test::TestRequest::get()
             .uri("/status")
-            .insert_header(("x-forwarded-for", "203.0.113.10"))
+            .peer_addr(SocketAddr::from(([203, 0, 113, 10], 40000)))
             .to_request();
         let response_one = test::call_service(&app, request_one).await;
         assert_eq!(response_one.status(), StatusCode::OK);
 
         let request_two = test::TestRequest::get()
             .uri("/status")
-            .insert_header(("x-forwarded-for", "203.0.113.10"))
+            .peer_addr(SocketAddr::from(([203, 0, 113, 10], 40001)))
+            .to_request();
+        let response_two = test::call_service(&app, request_two).await;
+        assert_eq!(response_two.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[actix_web::test]
+    async fn middleware_ignores_forwarded_headers_for_rate_limit_identity() {
+        let (middleware, queue) = build_middleware();
+        let app = test::init_service(
+            App::new()
+                .app_data(Data::new(()))
+                .wrap(middleware)
+                .route("/status", web::get().to(ok_handler)),
+        )
+        .await;
+
+        let request_one = test::TestRequest::get()
+            .uri("/status")
+            .peer_addr(SocketAddr::from(([203, 0, 113, 10], 40000)))
+            .insert_header(("x-forwarded-for", "198.51.100.1"))
+            .to_request();
+        let response_one = test::call_service(&app, request_one).await;
+        assert_eq!(response_one.status(), StatusCode::OK);
+
+        let request_two = test::TestRequest::get()
+            .uri("/status")
+            .peer_addr(SocketAddr::from(([203, 0, 113, 10], 40001)))
+            .insert_header(("x-forwarded-for", "198.51.100.2"))
             .to_request();
         let response_two = test::call_service(&app, request_two).await;
         assert_eq!(response_two.status(), StatusCode::TOO_MANY_REQUESTS);
