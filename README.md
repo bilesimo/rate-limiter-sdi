@@ -1,7 +1,5 @@
 # rate-limiter-sdi
 
-A Rust rate limiter based on chapter 4 of *System Design Interview* by Alex Xu.
-
 This project implements a server-side API rate limiter with:
 
 - `actix-web` middleware
