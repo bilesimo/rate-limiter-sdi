@@ -57,14 +57,14 @@ pub enum LimiterError {
 pub struct RateLimiter {
     config: Arc<RateLimitConfig>,
     store: Arc<RateLimitStore>,
-    queue: Arc<dyn ThrottledRequestQueue>,
+    queue: Arc<ThrottledRequestQueue>,
 }
 
 impl RateLimiter {
     pub fn new(
         config: RateLimitConfig,
         store: Arc<RateLimitStore>,
-        queue: Arc<dyn ThrottledRequestQueue>,
+        queue: Arc<ThrottledRequestQueue>,
     ) -> Self {
         Self {
             config: Arc::new(config),
@@ -234,7 +234,7 @@ mod tests {
     use super::{EnforcementResult, QueueDisposition, RateLimiter};
     use crate::{
         config::{RateLimitAlgorithm, RateLimitBehavior, RateLimitConfig, RateLimitRule},
-        queue::InMemoryThrottledRequestQueue,
+        queue::ThrottledRequestQueue,
         store::RateLimitStore,
     };
     use redis::AsyncCommands;
@@ -288,9 +288,23 @@ mod tests {
         }
     }
 
-    async fn build_fixed_window_limiter() -> (RateLimiter, InMemoryThrottledRequestQueue, String) {
-        let queue = InMemoryThrottledRequestQueue::default();
+    async fn queue_len(queue_key: &str) -> usize {
+        let client = redis::Client::open(test_redis_url()).expect("failed to build redis client");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("failed to connect to redis");
+        connection
+            .llen(queue_key)
+            .await
+            .expect("failed to read redis queue length")
+    }
+
+    async fn build_fixed_window_limiter() -> (RateLimiter, String, String) {
         let rule_name = unique_name("login");
+        let queue_key = unique_name("queue");
+        let queue_client =
+            redis::Client::open(test_redis_url()).expect("failed to build redis client");
         let limiter = RateLimiter::new(
             RateLimitConfig {
                 rules: vec![RateLimitRule {
@@ -303,18 +317,20 @@ mod tests {
                     },
                     behavior: RateLimitBehavior::Queue,
                 }],
-                queue_key: "queue".to_string(),
+                queue_key: queue_key.clone(),
             },
             Arc::new(build_store().await),
-            Arc::new(queue.clone()),
+            Arc::new(ThrottledRequestQueue::new(queue_client)),
         );
 
-        (limiter, queue, rule_name)
+        (limiter, rule_name, queue_key)
     }
 
-    async fn build_token_bucket_limiter() -> (RateLimiter, InMemoryThrottledRequestQueue, String) {
-        let queue = InMemoryThrottledRequestQueue::default();
+    async fn build_token_bucket_limiter() -> (RateLimiter, String, String) {
         let rule_name = unique_name("status");
+        let queue_key = unique_name("queue");
+        let queue_client =
+            redis::Client::open(test_redis_url()).expect("failed to build redis client");
         let limiter = RateLimiter::new(
             RateLimitConfig {
                 rules: vec![RateLimitRule {
@@ -328,18 +344,18 @@ mod tests {
                     },
                     behavior: RateLimitBehavior::Queue,
                 }],
-                queue_key: "queue".to_string(),
+                queue_key: queue_key.clone(),
             },
             Arc::new(build_store().await),
-            Arc::new(queue.clone()),
+            Arc::new(ThrottledRequestQueue::new(queue_client)),
         );
 
-        (limiter, queue, rule_name)
+        (limiter, rule_name, queue_key)
     }
 
     #[actix_web::test]
     async fn fixed_window_limiter_allows_first_request_and_queues_second() {
-        let (limiter, queue, rule_name) = build_fixed_window_limiter().await;
+        let (limiter, rule_name, queue_key) = build_fixed_window_limiter().await;
         let ip = IpAddr::from_str("127.0.0.1").unwrap();
 
         let first = limiter.check_ip(ip, "POST", "/login").await.unwrap();
@@ -354,13 +370,14 @@ mod tests {
             other => panic!("unexpected result: {other:?}"),
         }
 
-        assert_eq!(queue.len(), 1);
+        assert_eq!(queue_len(&queue_key).await, 1);
         delete_keys(&format!("rl:{rule_name}:*")).await;
+        delete_keys(&queue_key).await;
     }
 
     #[actix_web::test]
     async fn token_bucket_limiter_throttles_after_capacity_is_spent() {
-        let (limiter, queue, rule_name) = build_token_bucket_limiter().await;
+        let (limiter, rule_name, queue_key) = build_token_bucket_limiter().await;
         let ip = IpAddr::from_str("127.0.0.1").unwrap();
 
         let first = limiter.check_ip(ip, "GET", "/status").await.unwrap();
@@ -377,7 +394,8 @@ mod tests {
             other => panic!("unexpected result: {other:?}"),
         }
 
-        assert_eq!(queue.len(), 1);
+        assert_eq!(queue_len(&queue_key).await, 1);
         delete_keys(&format!("rl:{rule_name}:*")).await;
+        delete_keys(&queue_key).await;
     }
 }

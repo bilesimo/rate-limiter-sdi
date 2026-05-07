@@ -34,7 +34,7 @@ If Redis fails, the middleware logs the issue and lets the request through.
 - [src/store.rs](/Users/bilesimo/Development/rate-limiter-sdi/src/store.rs): Redis and in-memory rate-limit state backends
 - [src/middleware.rs](/Users/bilesimo/Development/rate-limiter-sdi/src/middleware.rs): `actix-web` middleware
 - [src/queue.rs](/Users/bilesimo/Development/rate-limiter-sdi/src/queue.rs): throttled-request queue abstraction
-- [examples/actix_demo.rs](/Users/bilesimo/Development/rate-limiter-sdi/examples/actix_demo.rs): runnable demo server
+- [src/main.rs](/Users/bilesimo/Development/rate-limiter-sdi/src/main.rs): runnable demo server entrypoint
 - [compose.yaml](/Users/bilesimo/Development/rate-limiter-sdi/compose.yaml): local Redis service for development
 - [config/rate-limits.yaml](/Users/bilesimo/Development/rate-limiter-sdi/config/rate-limits.yaml): sample rules
 - [docs/chapter-4-rate-limiter-plan.md](/Users/bilesimo/Development/rate-limiter-sdi/docs/chapter-4-rate-limiter-plan.md): implementation plan derived from the book chapter
@@ -155,18 +155,19 @@ This uses [compose.yaml](/Users/bilesimo/Development/rate-limiter-sdi/compose.ya
 Then run:
 
 ```bash
-cargo run --example actix_demo
+cargo run
 ```
 
 Optional environment variable:
 
 ```bash
-REDIS_URL=redis://127.0.0.1:6379 cargo run --example actix_demo
+REDIS_URL=redis://127.0.0.1:6379 cargo run
 ```
 
 The demo server binds to `127.0.0.1:8080` and exposes:
 
 - `GET /status`
+- `POST /login`
 
 When you are done, stop Redis with:
 
@@ -182,10 +183,10 @@ Minimal integration shape:
 use actix_web::{web, App, HttpResponse, HttpServer};
 use rate_limiter_sdi::{
     config::RateLimitConfig,
-    queue::RedisThrottledRequestQueue,
     store::RateLimitStore,
     RateLimitMiddleware,
     RateLimiter,
+    ThrottledRequestQueue,
 };
 use std::sync::Arc;
 
@@ -204,7 +205,7 @@ async fn main() -> std::io::Result<()> {
     let limiter = RateLimiter::new(
         config,
         Arc::new(RateLimitStore::new(redis_client.clone())),
-        Arc::new(RedisThrottledRequestQueue::new(redis_client)),
+        Arc::new(ThrottledRequestQueue::new(redis_client)),
     );
 
     HttpServer::new(move || {
@@ -217,8 +218,6 @@ async fn main() -> std::io::Result<()> {
     .await
 }
 ```
-
-See [examples/actix_demo.rs](/Users/bilesimo/Development/rate-limiter-sdi/examples/actix_demo.rs) for the working example.
 
 ## Queueing Model
 

@@ -10,7 +10,5 @@ pub use limiter::{
     ThrottledResponse,
 };
 pub use middleware::RateLimitMiddleware;
-pub use queue::{
-    InMemoryThrottledRequestQueue, QueueError, RedisThrottledRequestQueue, ThrottledRequest,
-};
+pub use queue::{QueueError, ThrottledRequest, ThrottledRequestQueue};
 pub use store::{CounterState, RateLimitStore, StoreError, TokenBucketState};

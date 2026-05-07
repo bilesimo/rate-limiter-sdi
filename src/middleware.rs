@@ -171,7 +171,7 @@ mod tests {
     use crate::{
         config::{RateLimitAlgorithm, RateLimitBehavior, RateLimitConfig, RateLimitRule},
         limiter::RateLimiter,
-        queue::InMemoryThrottledRequestQueue,
+        queue::ThrottledRequestQueue,
         store::RateLimitStore,
     };
     use actix_web::{
@@ -234,9 +234,23 @@ mod tests {
         }
     }
 
-    async fn build_middleware() -> (RateLimitMiddleware, InMemoryThrottledRequestQueue, String) {
-        let queue = InMemoryThrottledRequestQueue::default();
+    async fn queue_len(queue_key: &str) -> usize {
+        let client = redis::Client::open(test_redis_url()).expect("failed to build redis client");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("failed to connect to redis");
+        connection
+            .llen(queue_key)
+            .await
+            .expect("failed to read redis queue length")
+    }
+
+    async fn build_middleware() -> (RateLimitMiddleware, String, String) {
         let rule_name = unique_name("status");
+        let queue_key = unique_name("queue");
+        let queue_client =
+            redis::Client::open(test_redis_url()).expect("failed to build redis client");
         let limiter = RateLimiter::new(
             RateLimitConfig {
                 rules: vec![RateLimitRule {
@@ -250,18 +264,18 @@ mod tests {
                     },
                     behavior: RateLimitBehavior::Queue,
                 }],
-                queue_key: "queue".to_string(),
+                queue_key: queue_key.clone(),
             },
             Arc::new(build_store().await),
-            Arc::new(queue.clone()),
+            Arc::new(ThrottledRequestQueue::new(queue_client)),
         );
 
-        (RateLimitMiddleware::new(limiter), queue, rule_name)
+        (RateLimitMiddleware::new(limiter), rule_name, queue_key)
     }
 
     #[actix_web::test]
     async fn middleware_throttles_second_request_and_enqueues_it() {
-        let (middleware, queue, rule_name) = build_middleware().await;
+        let (middleware, rule_name, queue_key) = build_middleware().await;
         let app = test::init_service(
             App::new()
                 .app_data(Data::new(()))
@@ -283,13 +297,14 @@ mod tests {
             .to_request();
         let response_two = test::call_service(&app, request_two).await;
         assert_eq!(response_two.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(queue.len(), 1);
+        assert_eq!(queue_len(&queue_key).await, 1);
         delete_keys(&format!("rl:{rule_name}:*")).await;
+        delete_keys(&queue_key).await;
     }
 
     #[actix_web::test]
     async fn middleware_ignores_forwarded_headers_for_rate_limit_identity() {
-        let (middleware, queue, rule_name) = build_middleware().await;
+        let (middleware, rule_name, queue_key) = build_middleware().await;
         let app = test::init_service(
             App::new()
                 .app_data(Data::new(()))
@@ -313,7 +328,8 @@ mod tests {
             .to_request();
         let response_two = test::call_service(&app, request_two).await;
         assert_eq!(response_two.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(queue.len(), 1);
+        assert_eq!(queue_len(&queue_key).await, 1);
         delete_keys(&format!("rl:{rule_name}:*")).await;
+        delete_keys(&queue_key).await;
     }
 }
