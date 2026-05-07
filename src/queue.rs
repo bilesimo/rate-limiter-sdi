@@ -91,6 +91,13 @@ impl InMemoryThrottledRequestQueue {
             .unwrap_or(0)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries
+            .lock()
+            .map(|entries| entries.is_empty())
+            .unwrap_or(true)
+    }
+
     pub fn snapshot(&self) -> Vec<ThrottledRequest> {
         self.entries
             .lock()
