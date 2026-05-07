@@ -1,0 +1,21 @@
+queue_key: "ratelimiter:throttled"
+rules:
+  - name: "login-per-ip"
+    path: "/login"
+    methods:
+      - "POST"
+    algorithm:
+      type: "fixed_window"
+      requests_per_window: 5
+      window: 60
+    behavior: "queue"
+  - name: "status-per-ip"
+    path: "/status"
+    methods:
+      - "GET"
+    algorithm:
+      type: "token_bucket"
+      capacity: 30
+      refill_tokens: 5
+      refill_interval: 10
+    behavior: "block"
