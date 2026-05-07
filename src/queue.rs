@@ -68,7 +68,7 @@ impl RedisThrottledRequestQueue {
 impl ThrottledRequestQueue for RedisThrottledRequestQueue {
     async fn enqueue(&self, queue_key: &str, request: ThrottledRequest) -> Result<(), QueueError> {
         let payload = serde_json::to_string(&request)?;
-        let mut connection = self.client.get_multiplexed_tokio_connection().await?;
+        let mut connection = self.client.get_multiplexed_async_connection().await?;
         let _: usize = redis::cmd("RPUSH")
             .arg(queue_key)
             .arg(payload)

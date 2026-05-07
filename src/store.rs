@@ -1,9 +1,4 @@
-use async_trait::async_trait;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
-};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 const FIXED_WINDOW_LUA: &str = r#"
@@ -90,47 +85,25 @@ pub struct TokenBucketState {
 pub enum StoreError {
     #[error("redis store error: {0}")]
     Redis(#[from] redis::RedisError),
-    #[error("in-memory store lock poisoned")]
-    LockPoisoned,
-}
-
-#[async_trait]
-pub trait RateLimitStore: Send + Sync {
-    async fn increment_fixed_window(
-        &self,
-        key: &str,
-        window: Duration,
-    ) -> Result<CounterState, StoreError>;
-
-    async fn take_token_from_bucket(
-        &self,
-        key: &str,
-        capacity: u64,
-        refill_tokens: u64,
-        refill_interval: Duration,
-    ) -> Result<TokenBucketState, StoreError>;
 }
 
 #[derive(Clone)]
-pub struct RedisCounterStore {
+pub struct RateLimitStore {
     client: redis::Client,
 }
 
-impl RedisCounterStore {
+impl RateLimitStore {
     pub fn new(client: redis::Client) -> Self {
         Self { client }
     }
-}
 
-#[async_trait]
-impl RateLimitStore for RedisCounterStore {
-    async fn increment_fixed_window(
+    pub async fn increment_fixed_window(
         &self,
         key: &str,
         window: Duration,
     ) -> Result<CounterState, StoreError> {
         let script = redis::Script::new(FIXED_WINDOW_LUA);
-        let mut connection = self.client.get_multiplexed_tokio_connection().await?;
+        let mut connection = self.client.get_multiplexed_async_connection().await?;
         let (current, ttl_ms): (u64, i64) = script
             .key(key)
             .arg(window.as_millis() as u64)
@@ -143,7 +116,7 @@ impl RateLimitStore for RedisCounterStore {
         })
     }
 
-    async fn take_token_from_bucket(
+    pub async fn take_token_from_bucket(
         &self,
         key: &str,
         capacity: u64,
@@ -151,7 +124,7 @@ impl RateLimitStore for RedisCounterStore {
         refill_interval: Duration,
     ) -> Result<TokenBucketState, StoreError> {
         let script = redis::Script::new(TOKEN_BUCKET_LUA);
-        let mut connection = self.client.get_multiplexed_tokio_connection().await?;
+        let mut connection = self.client.get_multiplexed_async_connection().await?;
         let now_ms = unix_timestamp_millis();
         let (allowed, tokens_remaining, retry_after_ms, reset_after_ms): (u64, u64, i64, i64) =
             script
@@ -172,115 +145,6 @@ impl RateLimitStore for RedisCounterStore {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct InMemoryCounterStore {
-    fixed_windows: Arc<Mutex<HashMap<String, InMemoryFixedWindowEntry>>>,
-    buckets: Arc<Mutex<HashMap<String, InMemoryBucketEntry>>>,
-}
-
-#[derive(Debug, Clone)]
-struct InMemoryFixedWindowEntry {
-    count: u64,
-    expires_at: Instant,
-}
-
-#[derive(Debug, Clone)]
-struct InMemoryBucketEntry {
-    tokens: u64,
-    last_refill: Instant,
-}
-
-#[async_trait]
-impl RateLimitStore for InMemoryCounterStore {
-    async fn increment_fixed_window(
-        &self,
-        key: &str,
-        window: Duration,
-    ) -> Result<CounterState, StoreError> {
-        let mut entries = self
-            .fixed_windows
-            .lock()
-            .map_err(|_| StoreError::LockPoisoned)?;
-        let now = Instant::now();
-
-        entries.retain(|_, entry| entry.expires_at > now);
-
-        let entry = entries
-            .entry(key.to_string())
-            .or_insert_with(|| InMemoryFixedWindowEntry {
-                count: 0,
-                expires_at: now + window,
-            });
-
-        if entry.expires_at <= now {
-            entry.count = 0;
-            entry.expires_at = now + window;
-        }
-
-        entry.count += 1;
-
-        Ok(CounterState {
-            current: entry.count,
-            ttl: entry.expires_at.saturating_duration_since(now),
-        })
-    }
-
-    async fn take_token_from_bucket(
-        &self,
-        key: &str,
-        capacity: u64,
-        refill_tokens: u64,
-        refill_interval: Duration,
-    ) -> Result<TokenBucketState, StoreError> {
-        let mut entries = self.buckets.lock().map_err(|_| StoreError::LockPoisoned)?;
-        let now = Instant::now();
-
-        let entry = entries
-            .entry(key.to_string())
-            .or_insert_with(|| InMemoryBucketEntry {
-                tokens: capacity,
-                last_refill: now,
-            });
-
-        let elapsed = now.saturating_duration_since(entry.last_refill);
-        let refill_periods = elapsed.as_millis() / refill_interval.as_millis().max(1);
-
-        if refill_periods > 0 {
-            let replenished = refill_periods as u64 * refill_tokens;
-            entry.tokens = entry.tokens.saturating_add(replenished).min(capacity);
-            entry.last_refill += refill_interval.mul_f64(refill_periods as f64);
-        }
-
-        let allowed = entry.tokens >= 1;
-        if allowed {
-            entry.tokens -= 1;
-        }
-
-        let elapsed_since_last_refill = now.saturating_duration_since(entry.last_refill);
-        let retry_after = if allowed {
-            Duration::ZERO
-        } else {
-            refill_interval.saturating_sub(elapsed_since_last_refill)
-        };
-
-        let reset_after = if entry.tokens >= capacity {
-            Duration::ZERO
-        } else {
-            let missing_tokens = capacity - entry.tokens;
-            let refill_steps = missing_tokens.div_ceil(refill_tokens);
-            let total_reset = refill_interval.mul_f64(refill_steps as f64);
-            total_reset.saturating_sub(elapsed_since_last_refill)
-        };
-
-        Ok(TokenBucketState {
-            allowed,
-            tokens_remaining: entry.tokens,
-            retry_after,
-            reset_after,
-        })
-    }
-}
-
 fn unix_timestamp_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -294,39 +158,81 @@ fn duration_from_millis(milliseconds: i64) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{InMemoryCounterStore, RateLimitStore};
-    use std::time::Duration;
+    use super::RateLimitStore;
+    use redis::AsyncCommands;
+    use std::{
+        env,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_redis_url() -> String {
+        env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+    }
+
+    async fn build_store() -> RateLimitStore {
+        let client = redis::Client::open(test_redis_url()).expect("failed to build redis client");
+        RateLimitStore::new(client)
+    }
+
+    async fn delete_key(key: &str) {
+        let client = redis::Client::open(test_redis_url()).expect("failed to build redis client");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("failed to connect to redis");
+        let _: usize = connection
+            .del(key)
+            .await
+            .expect("failed to delete redis key");
+    }
+
+    fn unique_key(prefix: &str) -> String {
+        let nonce = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("test:{prefix}:{timestamp}:{nonce}")
+    }
 
     #[actix_web::test]
-    async fn in_memory_store_increments_within_window() {
-        let store = InMemoryCounterStore::default();
+    async fn redis_store_increments_within_window() {
+        let store = build_store().await;
+        let key = unique_key("fixed-window");
+
         let first = store
-            .increment_fixed_window("key", Duration::from_secs(60))
+            .increment_fixed_window(&key, Duration::from_secs(60))
             .await
             .unwrap();
         let second = store
-            .increment_fixed_window("key", Duration::from_secs(60))
+            .increment_fixed_window(&key, Duration::from_secs(60))
             .await
             .unwrap();
 
         assert_eq!(first.current, 1);
         assert_eq!(second.current, 2);
+
+        delete_key(&key).await;
     }
 
     #[actix_web::test]
-    async fn in_memory_token_bucket_refuses_request_after_capacity_is_spent() {
-        let store = InMemoryCounterStore::default();
+    async fn redis_token_bucket_refuses_request_after_capacity_is_spent() {
+        let store = build_store().await;
+        let key = unique_key("token-bucket");
 
         let first = store
-            .take_token_from_bucket("bucket", 2, 1, Duration::from_secs(60))
+            .take_token_from_bucket(&key, 2, 1, Duration::from_secs(60))
             .await
             .unwrap();
         let second = store
-            .take_token_from_bucket("bucket", 2, 1, Duration::from_secs(60))
+            .take_token_from_bucket(&key, 2, 1, Duration::from_secs(60))
             .await
             .unwrap();
         let third = store
-            .take_token_from_bucket("bucket", 2, 1, Duration::from_secs(60))
+            .take_token_from_bucket(&key, 2, 1, Duration::from_secs(60))
             .await
             .unwrap();
 
@@ -335,5 +241,7 @@ mod tests {
         assert!(!third.allowed);
         assert_eq!(third.tokens_remaining, 0);
         assert!(third.retry_after > Duration::ZERO);
+
+        delete_key(&key).await;
     }
 }

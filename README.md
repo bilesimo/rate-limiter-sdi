@@ -183,7 +183,7 @@ use actix_web::{web, App, HttpResponse, HttpServer};
 use rate_limiter_sdi::{
     config::RateLimitConfig,
     queue::RedisThrottledRequestQueue,
-    store::RedisCounterStore,
+    store::RateLimitStore,
     RateLimitMiddleware,
     RateLimiter,
 };
@@ -203,7 +203,7 @@ async fn main() -> std::io::Result<()> {
 
     let limiter = RateLimiter::new(
         config,
-        Arc::new(RedisCounterStore::new(redis_client.clone())),
+        Arc::new(RateLimitStore::new(redis_client.clone())),
         Arc::new(RedisThrottledRequestQueue::new(redis_client)),
     );
 
@@ -251,6 +251,13 @@ Useful commands:
 ```bash
 cargo fmt
 cargo check
+cargo test
+```
+
+The test suite now uses the Redis-backed store directly, so make sure Redis is running before `cargo test`:
+
+```bash
+docker compose up -d redis
 cargo test
 ```
 

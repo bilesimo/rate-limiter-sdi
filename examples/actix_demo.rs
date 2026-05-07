@@ -1,11 +1,11 @@
 use actix_web::{App, HttpResponse, HttpServer, web};
 use rate_limiter_sdi::{
     RateLimitMiddleware, RateLimiter, config::RateLimitConfig, queue::RedisThrottledRequestQueue,
-    store::RedisCounterStore,
+    store::RateLimitStore,
 };
 use std::{env, sync::Arc};
 
-async fn status() -> HttpResponse {
+async fn return_ok() -> HttpResponse {
     HttpResponse::Ok().body("ok")
 }
 
@@ -20,14 +20,15 @@ async fn main() -> std::io::Result<()> {
     })?;
     let limiter = RateLimiter::new(
         config,
-        Arc::new(RedisCounterStore::new(redis_client.clone())),
+        Arc::new(RateLimitStore::new(redis_client.clone())),
         Arc::new(RedisThrottledRequestQueue::new(redis_client)),
     );
 
     HttpServer::new(move || {
         App::new()
             .wrap(RateLimitMiddleware::new(limiter.clone()))
-            .route("/status", web::get().to(status))
+            .route("/status", web::get().to(return_ok))
+            .route("/login", web::get().to(return_ok))
     })
     .bind(("127.0.0.1", 8080))?
     .run()

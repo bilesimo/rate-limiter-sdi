@@ -56,14 +56,14 @@ pub enum LimiterError {
 #[derive(Clone)]
 pub struct RateLimiter {
     config: Arc<RateLimitConfig>,
-    store: Arc<dyn RateLimitStore>,
+    store: Arc<RateLimitStore>,
     queue: Arc<dyn ThrottledRequestQueue>,
 }
 
 impl RateLimiter {
     pub fn new(
         config: RateLimitConfig,
-        store: Arc<dyn RateLimitStore>,
+        store: Arc<RateLimitStore>,
         queue: Arc<dyn ThrottledRequestQueue>,
     ) -> Self {
         Self {
@@ -235,16 +235,66 @@ mod tests {
     use crate::{
         config::{RateLimitAlgorithm, RateLimitBehavior, RateLimitConfig, RateLimitRule},
         queue::InMemoryThrottledRequestQueue,
-        store::InMemoryCounterStore,
+        store::RateLimitStore,
     };
-    use std::{net::IpAddr, str::FromStr, sync::Arc, time::Duration};
+    use redis::AsyncCommands;
+    use std::{
+        env,
+        net::IpAddr,
+        str::FromStr,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
-    fn build_fixed_window_limiter() -> (RateLimiter, InMemoryThrottledRequestQueue) {
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn test_redis_url() -> String {
+        env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+    }
+
+    async fn build_store() -> RateLimitStore {
+        let client = redis::Client::open(test_redis_url()).expect("failed to build redis client");
+        RateLimitStore::new(client)
+    }
+
+    fn unique_name(prefix: &str) -> String {
+        let nonce = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("{prefix}-{timestamp}-{nonce}")
+    }
+
+    async fn delete_keys(pattern: &str) {
+        let client = redis::Client::open(test_redis_url()).expect("failed to build redis client");
+        let mut connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .expect("failed to connect to redis");
+        let keys: Vec<String> = connection
+            .keys(pattern)
+            .await
+            .expect("failed to scan redis keys");
+
+        if !keys.is_empty() {
+            let _: usize = connection
+                .del(keys)
+                .await
+                .expect("failed to delete redis keys");
+        }
+    }
+
+    async fn build_fixed_window_limiter() -> (RateLimiter, InMemoryThrottledRequestQueue, String) {
         let queue = InMemoryThrottledRequestQueue::default();
+        let rule_name = unique_name("login");
         let limiter = RateLimiter::new(
             RateLimitConfig {
                 rules: vec![RateLimitRule {
-                    name: "login".to_string(),
+                    name: rule_name.clone(),
                     path: Some("/login".to_string()),
                     methods: vec!["POST".to_string()],
                     algorithm: RateLimitAlgorithm::FixedWindow {
@@ -255,19 +305,20 @@ mod tests {
                 }],
                 queue_key: "queue".to_string(),
             },
-            Arc::new(InMemoryCounterStore::default()),
+            Arc::new(build_store().await),
             Arc::new(queue.clone()),
         );
 
-        (limiter, queue)
+        (limiter, queue, rule_name)
     }
 
-    fn build_token_bucket_limiter() -> (RateLimiter, InMemoryThrottledRequestQueue) {
+    async fn build_token_bucket_limiter() -> (RateLimiter, InMemoryThrottledRequestQueue, String) {
         let queue = InMemoryThrottledRequestQueue::default();
+        let rule_name = unique_name("status");
         let limiter = RateLimiter::new(
             RateLimitConfig {
                 rules: vec![RateLimitRule {
-                    name: "status".to_string(),
+                    name: rule_name.clone(),
                     path: Some("/status".to_string()),
                     methods: vec!["GET".to_string()],
                     algorithm: RateLimitAlgorithm::TokenBucket {
@@ -279,16 +330,16 @@ mod tests {
                 }],
                 queue_key: "queue".to_string(),
             },
-            Arc::new(InMemoryCounterStore::default()),
+            Arc::new(build_store().await),
             Arc::new(queue.clone()),
         );
 
-        (limiter, queue)
+        (limiter, queue, rule_name)
     }
 
     #[actix_web::test]
     async fn fixed_window_limiter_allows_first_request_and_queues_second() {
-        let (limiter, queue) = build_fixed_window_limiter();
+        let (limiter, queue, rule_name) = build_fixed_window_limiter().await;
         let ip = IpAddr::from_str("127.0.0.1").unwrap();
 
         let first = limiter.check_ip(ip, "POST", "/login").await.unwrap();
@@ -304,11 +355,12 @@ mod tests {
         }
 
         assert_eq!(queue.len(), 1);
+        delete_keys(&format!("rl:{rule_name}:*")).await;
     }
 
     #[actix_web::test]
     async fn token_bucket_limiter_throttles_after_capacity_is_spent() {
-        let (limiter, queue) = build_token_bucket_limiter();
+        let (limiter, queue, rule_name) = build_token_bucket_limiter().await;
         let ip = IpAddr::from_str("127.0.0.1").unwrap();
 
         let first = limiter.check_ip(ip, "GET", "/status").await.unwrap();
@@ -326,5 +378,6 @@ mod tests {
         }
 
         assert_eq!(queue.len(), 1);
+        delete_keys(&format!("rl:{rule_name}:*")).await;
     }
 }
