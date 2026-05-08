@@ -1,4 +1,4 @@
-# rate-limiter-sdi
+# rate-limiter
 
 This project implements a server-side API rate limiter with:
 
